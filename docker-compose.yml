@@ -1,0 +1,13 @@
+services:
+  web:
+    build: .
+    image: oral-history-license-checker
+    container_name: oral-history-checker
+    ports:
+      - "8000:8000"
+    volumes:
+      - oral-history-data:/data
+    restart: unless-stopped
+
+volumes:
+  oral-history-data:

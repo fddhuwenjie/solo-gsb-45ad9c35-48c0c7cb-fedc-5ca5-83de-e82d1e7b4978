@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>口述史发布许可校验台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="site-header">
+  <h1>口述史发布许可校验台</h1>
+  <p class="subtitle">按发言与授权边界切分时间轴 · 拒绝优先 · 冲突 / 缺项 / 未解禁逐段标注 · 发行凭据可追溯封存 · 渠道投放台账 · 本地运行</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>1. 访谈</h2>
+    <div class="row">
+      <select id="interview-select"></select>
+      <button id="btn-refresh">刷新列表</button>
+    </div>
+    <div class="row">
+      <input id="new-title" placeholder="新访谈标题">
+      <input id="new-duration" class="tc-input" placeholder="时长 HH:MM:SS" value="01:00:00">
+      <button id="btn-create-interview" class="primary">新建访谈</button>
+    </div>
+    <div id="interview-edit" class="row hidden">
+      <input id="edit-title" placeholder="访谈标题">
+      <input id="edit-duration" class="tc-input" placeholder="时长 HH:MM:SS">
+      <button id="btn-save-interview">保存修改</button>
+      <button id="btn-delete-interview" class="danger">删除访谈</button>
+    </div>
+  </section>
+
+  <div id="detail-panels" class="hidden">
+    <section class="card">
+      <h2>2. 说话人</h2>
+      <table>
+        <thead><tr><th>ID</th><th>姓名</th><th>操作</th></tr></thead>
+        <tbody id="speakers-body"></tbody>
+        <tfoot><tr>
+          <td>新</td>
+          <td><input id="new-speaker-name" placeholder="说话人姓名"></td>
+          <td><button id="btn-add-speaker">添加</button></td>
+        </tr></tfoot>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>3. 发言区间</h2>
+      <table>
+        <thead><tr><th>ID</th><th>说话人</th><th>开始</th><th>结束</th><th>操作</th></tr></thead>
+        <tbody id="segments-body"></tbody>
+        <tfoot><tr>
+          <td>新</td>
+          <td><select id="new-seg-speaker"></select></td>
+          <td><input id="new-seg-start" class="tc-input" placeholder="00:00:00"></td>
+          <td><input id="new-seg-end" class="tc-input" placeholder="00:10:00"></td>
+          <td><button id="btn-add-segment">添加</button></td>
+        </tr></tfoot>
+      </table>
+      <p class="hint">时间码格式 HH:MM:SS（也接受 MM:SS 或秒数）。</p>
+    </section>
+
+    <section class="card">
+      <h2>4. 授权区间</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th><th>说话人</th><th>开始</th><th>结束</th>
+            <th>允许媒介</th><th>拒绝媒介</th><th>解禁日期</th><th>备注</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="licenses-body"></tbody>
+        <tfoot><tr>
+          <td>新</td>
+          <td><select id="new-lic-speaker"></select></td>
+          <td><input id="new-lic-start" class="tc-input" placeholder="00:00:00"></td>
+          <td><input id="new-lic-end" class="tc-input" placeholder="01:00:00"></td>
+          <td>
+            <label><input type="checkbox" id="new-lic-allow-audio" checked>音频</label>
+            <label><input type="checkbox" id="new-lic-allow-text">文字</label>
+          </td>
+          <td>
+            <label><input type="checkbox" id="new-lic-deny-audio">音频</label>
+            <label><input type="checkbox" id="new-lic-deny-text">文字</label>
+          </td>
+          <td><input type="date" id="new-lic-embargo"></td>
+          <td><input id="new-lic-note" placeholder="备注"></td>
+          <td><button id="btn-add-license">添加</button></td>
+        </tr></tfoot>
+      </table>
+      <p class="hint">解禁日期留空表示立即可用；同一说话人多条授权重叠时，拒绝优先；允许与拒绝并存记为授权冲突。</p>
+    </section>
+
+    <section class="card">
+      <h2>5. 发布校验</h2>
+      <div class="row">
+        <label>发布日期 <input type="date" id="pub-date"></label>
+        <label>版本媒介
+          <select id="medium">
+            <option value="audio">音频</option>
+            <option value="text">文字</option>
+          </select>
+        </label>
+        <button id="btn-evaluate" class="primary">开始校验</button>
+      </div>
+    </section>
+
+    <section class="card" id="results-card">
+      <h2>校验结果</h2>
+      <div id="results-summary" class="summary">尚未校验。</div>
+      <div id="timeline" class="timeline"></div>
+      <div class="legend">
+        <span class="badge ok">可发布</span>
+        <span class="badge blocked">不可发布</span>
+        <span class="badge no_speech">无发言</span>
+      </div>
+      <table>
+        <thead>
+          <tr><th>区间（时间码）</th><th>时长</th><th>结果</th><th>说话人</th><th>原因 / 说明</th></tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </section>
+
+    <section class="card" id="remediate-card">
+      <h2>6. 补件并复核</h2>
+      <p class="hint">
+        沿用上方发布日期与媒介：系统在同一事务中先按当前授权试算，再合并整批补件重算；
+        仅当整条时间轴全部可发布时才一次性写入，否则不落任何记录并列出每个阻断区间及原因。
+        同一说话人的补件时间区间不得重叠，同一补件不得同时允许并拒绝同一媒介，越界补件令整批失败。
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>说话人</th><th>开始</th><th>结束</th>
+            <th>允许媒介</th><th>拒绝媒介</th><th>解禁日期</th><th>备注</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="remediate-body"></tbody>
+      </table>
+      <div class="row">
+        <button id="btn-rem-add">添加一行</button>
+        <button id="btn-rem-dry">试算（不写入）</button>
+        <button id="btn-rem-commit" class="primary">补件并写入</button>
+      </div>
+      <div id="remediate-result"></div>
+    </section>
+  </div>
+
+  <section class="card" id="credentials-card">
+    <h2>7. 发行凭据</h2>
+    <p class="hint">
+      选择访谈、发布日期与媒介后封存凭据：系统在同一事务中读取时长、说话人、发言与授权
+      并按既有规则校验，仅当整条时间轴全部可发布时才保存不可修改的凭据
+      （封存当时的完整输入与校验结果），失败不留记录。
+      查阅凭据时保留发行时结论，并在一致的读取快照中比较现有资料、重新校验：
+      时长、说话人、发言或授权有任何变化即标为「待复核」（即便仍可发布），并列出当前阻断区间；
+      原访谈被删除时显示「来源缺失」，历史凭据仍可查看。
+    </p>
+    <div class="row">
+      <button id="btn-create-credential" class="primary">校验并封存凭据</button>
+      <button id="btn-refresh-credentials">刷新凭据列表</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th>访谈</th><th>发布日期</th><th>媒介</th>
+          <th>封存时间</th><th>当前状态</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="credentials-body"></tbody>
+    </table>
+    <div id="credential-detail"></div>
+  </section>
+
+  <section class="card" id="placements-card">
+    <h2>8. 渠道投放台账</h2>
+    <p class="hint">
+      为已封存的发行凭据登记渠道投放：选择凭据、录入渠道名与投放链接，
+      系统在同一事务中复核来源 —— 仅当原访谈仍在、资料与封存时一致且当前整段可发布时，
+      才保存「投放中」记录及登记时间，否则说明原因且不留记录。
+      列表与详情在一致的读取快照中展示投放状态与凭据当前风险：
+      资料后来变化即提示「需处理」（即便仍可发布），来源删除则提示「来源缺失」，
+      历史链接、时间与封存结论仍保留。
+      确认渠道内容已撤下后，可填写原因并标记「已撤下」，保留撤下时间；凭据不改动。
+    </p>
+    <div class="row">
+      <select id="placement-credential"></select>
+      <input id="placement-channel" placeholder="渠道名（如：官网专题页）">
+      <input id="placement-url" class="url-input" placeholder="投放链接 https://…">
+      <button id="btn-create-placement" class="primary">登记投放</button>
+      <button id="btn-refresh-placements">刷新投放列表</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th>凭据</th><th>访谈</th><th>渠道</th><th>投放链接</th>
+          <th>登记时间</th><th>投放状态</th><th>凭据风险</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="placements-body"></tbody>
+    </table>
+    <div id="placement-detail"></div>
+  </section>
+
+  <p id="status-line" role="status"></p>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
