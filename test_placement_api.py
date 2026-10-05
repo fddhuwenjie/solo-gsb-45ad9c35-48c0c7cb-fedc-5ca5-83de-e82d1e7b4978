@@ -61,10 +61,6 @@ class PlacementApiTest(unittest.TestCase):
     def placement_count(self):
         return len(self.client.get("/api/placements").get_json())
 
-    def license_id(self):
-        return self.client.get(
-            f"/api/interviews/{self.iid}").get_json()["licenses"][0]["id"]
-
     # ---------------------------------------------------------- 登记
 
     def test_empty_channel_or_url_rejected(self):
@@ -163,10 +159,17 @@ class PlacementApiTest(unittest.TestCase):
 
     def test_detail_lists_current_blocked_intervals(self):
         pid = self.register().get_json()["id"]
-        self.client.put(f"/api/licenses/{self.license_id()}", json={
-            "start_seconds": 0, "end_seconds": 600,
-            "allow_media": [], "deny_media": ["audio"],
-            "embargo_until": None, "note": ""})
+        lid = self.client.get(
+            f"/api/interviews/{self.iid}").get_json()["licenses"][0]["id"]
+        # 资料后来变化且当前不可发布（直接改库模拟其他来源的变化，
+        # 绕过授权编辑 / 删除端点的在投渠道提交前复核）
+        conn = sqlite3.connect(_DB)
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "UPDATE licenses SET allow_media = '[]',"
+            " deny_media = '[\"audio\"]' WHERE id = ?", (lid,))
+        conn.commit()
+        conn.close()
         detail = self.client.get(f"/api/placements/{pid}").get_json()
         self.assertEqual(detail["risk"], "review")
         blocked = detail["current"]["blocked"]

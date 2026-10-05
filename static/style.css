@@ -178,6 +178,16 @@ td.empty { color: var(--mute); text-align: center; }
 #credential-detail h4 { font-size: 14px; margin: 14px 0 6px; }
 #credential-detail:empty { display: none; }
 
+#license-guard-result { margin-top: 10px; }
+#license-guard-result:empty { display: none; }
+#license-guard-result .guard-item {
+  border: 1px solid #e0b4b4;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  background: #fdf6f6;
+}
+
 td.tc { font-family: ui-monospace, Consolas, monospace; white-space: nowrap; }
 
 tr.blocked td { background: #fdf3f3; }

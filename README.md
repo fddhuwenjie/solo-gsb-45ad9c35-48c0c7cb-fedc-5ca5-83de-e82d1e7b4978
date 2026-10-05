@@ -63,6 +63,8 @@ python app.py          # 默认监听 8000 端口，可用 PORT 环境变量修�
    确认渠道内容已撤下后点「撤下」，填写原因并标记「已撤下」，保留撤下时间。
 
 访谈、说话人、发言与授权记录均可在页面上直接修改、保存或删除；
+**修改或删除授权会在同一 SQLite 写事务中先复核全部「仍在投」的渠道投放**
+（见下节），可能被拦截；
 发行凭据封存后不可修改、不可删除，原访谈删除后仍可查阅；
 投放记录只增不删，撤下仅更新状态与撤下时间，凭据不改动。
 
@@ -224,6 +226,86 @@ curl -s -X POST http://localhost:8000/api/placements/1/withdraw \
 - `current.summary` / `current.blocked`：按封存的发布日期与媒介对现有资料
   重新校验的汇总与当前阻断区间；来源缺失时 `current` 为 null。
 
+## 修改 / 删除授权的在投渠道提交前复核
+
+访谈一旦有**投放中**的渠道版本，事后修改或删除说话人授权就可能让公开内容
+失去许可。因此 `PUT /api/licenses/<id>` 与 `DELETE /api/licenses/<id>`
+在同一 SQLite 写事务（`BEGIN IMMEDIATE`）中执行提交前复核：
+
+1. 读取授权归属（所属说话人 / 访谈）并**试用变更**（先在事务内 UPDATE / DELETE，未提交）；
+2. 找出该访谈每条**仍在投**（`active`）的渠道投放，按其关联凭据封存的
+   **发布日期**与**媒介**，对变更后的整段时间轴重新校验；
+3. **只要有一个版本出现不可发布区间，就回滚整笔变更**（HTTP 409），
+   返回 `affected_placements`：受影响的投放 ID、渠道、链接、发布日期 / 媒介、
+   阻断区间（时间码）及原因；
+4. 全部仍可发布时才提交 —— **已撤下（withdrawn）的投放不阻拦**；
+5. 封存凭据始终不改动；变更提交后资料与封存时是否一致，
+   仍按原逻辑显示「待复核」（即便仍可发布）。
+
+请求体与成功响应保持兼容：`PUT` 成功仍返回
+`{id, speaker_id, start_seconds, end_seconds, allow_media, deny_media, embargo_until, note}`，
+`DELETE` 成功仍返回 `{"deleted": <id>}`；授权不存在仍为 HTTP 404，
+请求体非法仍为 HTTP 400。仅在被在投投放拦截时新增 HTTP 409 响应：
+
+```json
+{
+  "error": "该变更会令 1 条仍在投的渠道投放出现不可发布区间，整笔变更已回滚，授权记录未改动（已撤下的投放不阻拦）",
+  "allowed": false,
+  "rolled_back": true,
+  "action": "update",
+  "license_id": 1,
+  "affected_placements": [
+    {
+      "placement_id": 1,
+      "credential_id": 1,
+      "channel": "官网专题页",
+      "url": "https://example.com/features/oral-history-1",
+      "medium": "audio",
+      "medium_label": "音频",
+      "publication_date": "2026-10-04",
+      "blocked": [
+        {
+          "start_seconds": 300,
+          "end_seconds": 600,
+          "start_timecode": "00:05:00",
+          "end_timecode": "00:10:00",
+          "status": "blocked",
+          "status_label": "不可发布",
+          "speakers": ["张三"],
+          "reasons": ["张三：缺少覆盖该区间的授权记录（缺项）"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+调用示例（沿用上文已封存凭据 #1、已登记投放 #1 的访谈）：
+
+```bash
+# 尝试把授权改为拒绝音频 -> 投放 #1 的音频版本出现不可发布区间，
+# 整笔变更回滚（HTTP 409），响应给出受影响投放、链接、阻断区间及原因
+curl -s -X PUT http://localhost:8000/api/licenses/1 \
+  -H 'Content-Type: application/json' \
+  -d '{"start_seconds": 0, "end_seconds": 600,
+       "allow_media": [], "deny_media": ["audio"],
+       "embargo_until": null, "note": ""}'
+
+# 尝试删除授权 -> 同样会被投放 #1 拦截（HTTP 409），授权仍保留
+curl -s -X DELETE http://localhost:8000/api/licenses/1
+
+# 已撤下的投放不阻拦：确认渠道内容撤下后，再删除授权即成功
+curl -s -X POST http://localhost:8000/api/placements/1/withdraw \
+  -H 'Content-Type: application/json' \
+  -d '{"reason": "专题页已下线"}'
+curl -s -X DELETE http://localhost:8000/api/licenses/1
+# -> {"deleted": 1}
+```
+
+同一访谈若有多份凭据（如音频 / 文字两个版本，或不同发布日期）并分别登记了
+投放，系统会按**每条投放各自凭据**的发布日期与媒介逐一重算；任一版本被阻断
+即回滚整笔变更，`affected_placements` 只列出真正出现不可发布区间的投放。
+
 ## 数据持久化
 
 - 容器内数据库为 `/data/oral_history.db`，Compose / 运行命令已挂载卷 `oral_history_data`，重启不丢数据。
@@ -242,7 +324,7 @@ curl -s -X POST http://localhost:8000/api/placements/1/withdraw \
 | POST | `/api/interviews/<id>/segments` | 添加发言区间 `{speaker_id, start_seconds, end_seconds}` |
 | PUT / DELETE | `/api/segments/<id>` | 修改 / 删除发言区间 |
 | POST | `/api/speakers/<id>/licenses` | 添加授权 `{start_seconds, end_seconds, allow_media, deny_media, embargo_until, note}` |
-| PUT / DELETE | `/api/licenses/<id>` | 修改 / 删除授权 |
+| PUT / DELETE | `/api/licenses/<id>` | 修改 / 删除授权：同一写事务试用变更并按每条仍在投投放凭据的发布日期与媒介复核整段，任一版本不可发布即回滚（HTTP 409，含投放 ID / 链接 / 阻断区间 / 原因）；已撤下不阻拦，请求与成功响应兼容 |
 | POST | `/api/interviews/<id>/evaluate` | 校验 `{publication_date, medium}`，返回合并后的时间码区间与原因 |
 | POST | `/api/interviews/<id>/remediate` | 补件并复核 `{publication_date, medium, commit, supplements}`，同一事务试算 + 满足条件才一次性写入 |
 | POST | `/api/interviews/<id>/credentials` | 封存发行凭据 `{publication_date, medium}`：同一事务校验，全部可发布才落库，失败不留记录 |
@@ -260,9 +342,11 @@ python -m unittest test_evaluator.py -v   # 核心校验逻辑 + 补件批次校
 python -m unittest test_remediation.py -v # 补件事务编排（纯 Python + SQLite）
 python -m unittest test_credentials.py -v # 发行凭据事务编排（纯 Python + SQLite）
 python -m unittest test_placements.py -v  # 渠道投放台账事务编排（纯 Python + SQLite）
+python -m unittest test_license_guards.py -v  # 授权变更在投渠道复核事务编排（纯 Python + SQLite）
 python -m unittest test_remediate_api.py -v  # 补件接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 python -m unittest test_credential_api.py -v # 凭据接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 python -m unittest test_placement_api.py -v  # 投放台账接口 HTTP 层（需 Flask，Docker 镜像内可运行）
+python -m unittest test_license_guard_api.py -v  # 授权变更复核接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 node test_frontend.js                     # 前端交互冒烟测试（可选，需 Node）
 ```
 
@@ -274,13 +358,16 @@ evaluator.py         核心校验逻辑：切分时间轴、逐段判定、相�
 remediation.py       补件并复核：同一 SQLite 事务中的试算与一次性写入
 credentials.py       发行凭据：同一事务中校验并封存，查阅时在一致快照中复核现状
 placements.py        渠道投放台账：同一事务复核来源并登记，一致快照查阅，撤下保留时间
+license_guards.py    授权修改 / 删除：同一写事务试用变更并按在投投放凭据重算整段，阻断即回滚
 test_evaluator.py    核心逻辑单元测试
 test_remediation.py  补件事务编排单元测试（不依赖 Flask）
 test_credentials.py  发行凭据事务编排单元测试（不依赖 Flask）
 test_placements.py   渠道投放台账事务编排单元测试（不依赖 Flask）
+test_license_guards.py 授权变更复核事务编排单元测试（不依赖 Flask）
 test_remediate_api.py 补件接口 HTTP 层测试（需 Flask）
 test_credential_api.py 凭据接口 HTTP 层测试（需 Flask）
 test_placement_api.py 投放台账接口 HTTP 层测试（需 Flask）
+test_license_guard_api.py 授权变更复核接口 HTTP 层测试（需 Flask）
 templates/index.html 单页界面
 static/app.js        前端交互（原生 JavaScript）
 static/style.css     样式

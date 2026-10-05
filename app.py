@@ -7,6 +7,7 @@ from datetime import date
 from flask import Flask, g, jsonify, render_template, request
 
 import credentials
+import license_guards
 import placements
 from evaluator import MEDIA_LABELS, evaluate_timeline
 from remediation import run_remediation
@@ -460,8 +461,10 @@ def create_license(sid):
 
 @app.put("/api/licenses/<int:lic_id>")
 def update_license(lic_id):
-    db = get_db()
-    lic = db.execute(
+    # 404 与请求体校验在事务外完成；同一写事务内试用变更并按每条
+    # 仍在投投放所关联凭据的发布日期与媒介复核整段，任一版本不可发布
+    # 即回滚整笔变更（HTTP 409，返回受影响投放 ID、链接、阻断区间及原因）。
+    lic = get_db().execute(
         "SELECT * FROM licenses WHERE id = ?", (lic_id,)).fetchone()
     if not lic:
         return error("授权记录不存在", 404)
@@ -471,26 +474,17 @@ def update_license(lic_id):
         payload(), interview["duration_seconds"])
     if problem:
         return error(problem)
-    db.execute(
-        "UPDATE licenses SET start_seconds = ?, end_seconds = ?,"
-        " allow_media = ?, deny_media = ?, embargo_until = ?, note = ?"
-        " WHERE id = ?",
-        (values["start_seconds"], values["end_seconds"],
-         json.dumps(values["allow_media"]),
-         json.dumps(values["deny_media"]),
-         values["embargo_until"], values["note"], lic_id))
-    db.commit()
-    return jsonify(id=lic_id, speaker_id=lic["speaker_id"], **values)
+    result, status = license_guards.update_license(
+        get_db(), lic_id, values)
+    return jsonify(result), status
 
 
 @app.delete("/api/licenses/<int:lic_id>")
 def delete_license(lic_id):
-    db = get_db()
-    cur = db.execute("DELETE FROM licenses WHERE id = ?", (lic_id,))
-    db.commit()
-    if cur.rowcount == 0:
-        return error("授权记录不存在", 404)
-    return jsonify(deleted=lic_id)
+    # 同一写事务内试用删除并复核全部在投投放：已撤下的投放不阻拦，
+    # 其余变更照常提交；有版本出现不可发布区间则回滚并返回拦截明细。
+    result, status = license_guards.delete_license(get_db(), lic_id)
+    return jsonify(result), status
 
 
 # ---------------------------------------------------------------- 校验

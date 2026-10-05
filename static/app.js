@@ -373,19 +373,68 @@ async function addLicense() {
   await api(`/api/speakers/${speaker_id}/licenses`, "POST", values);
   await refreshDetail();
   render();
+  $("license-guard-result").innerHTML = "";
+}
+
+/* 授权变更被在投投放拦截（409）：展示受影响投放 ID、链接、阻断区间及原因 */
+function renderLicenseGuardFailure(data) {
+  const lines = data.affected_placements.map((p) => `
+    <div class="guard-item">
+      <p class="bad-text">
+        投放 <b>#${p.placement_id}</b>（凭据 #${p.credential_id} ·
+        ${esc(p.channel)} · 发布日期 ${esc(p.publication_date)} · ${esc(p.medium_label)}）
+        <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a>
+      </p>
+      ${intervalsTableHtml(p.blocked)}
+    </div>`).join("");
+  $("license-guard-result").innerHTML = `
+    <p class="bad-text">✘ ${esc(data.error)}</p>
+    ${lines}`;
 }
 
 async function saveLicense(id) {
   const values = readLicenseInputs(`lic-${id}`);
-  await api(`/api/licenses/${id}`, "PUT", values);
+  let resp;
+  try {
+    resp = await fetch(`/api/licenses/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    });
+  } catch (e) {
+    throw new Error("无法连接服务器");
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 409) {
+    // 在投投放复核未通过：整笔变更已回滚，展示拦截明细（保留表单供修改）
+    renderLicenseGuardFailure(data);
+    throw new Error(data.error || "变更会阻断在投投放，已回滚，授权未改动");
+  }
+  if (!resp.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
   await refreshDetail();
   render();
+  $("license-guard-result").innerHTML =
+    `<p class="ok-text">✔ 授权 #${id} 已保存；全部仍在投的投放复核通过。</p>`;
 }
 
 async function delLicense(id) {
-  await api(`/api/licenses/${id}`, "DELETE");
+  let resp;
+  try {
+    resp = await fetch(`/api/licenses/${id}`, { method: "DELETE" });
+  } catch (e) {
+    throw new Error("无法连接服务器");
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 409) {
+    // 在投投放复核未通过：整笔删除已回滚，授权仍保留，展示拦截明细
+    renderLicenseGuardFailure(data);
+    throw new Error(data.error || "删除会阻断在投投放，已回滚，授权仍保留");
+  }
+  if (!resp.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
   await refreshDetail();
   render();
+  $("license-guard-result").innerHTML =
+    `<p class="ok-text">✔ 授权 #${id} 已删除；全部仍在投的投放复核通过。</p>`;
 }
 
 /* ---------- 校验 ---------- */

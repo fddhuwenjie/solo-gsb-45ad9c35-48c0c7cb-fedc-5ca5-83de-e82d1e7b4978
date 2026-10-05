@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py evaluator.py remediation.py credentials.py placements.py ./
+COPY app.py evaluator.py remediation.py credentials.py placements.py license_guards.py ./
 COPY templates ./templates
 COPY static ./static
 

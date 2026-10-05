@@ -53,6 +53,33 @@ const sandbox = {
     if (path.endsWith("/remediate")) {
       return { ok: true, status: 200, json: async () => sandbox.__remResponse };
     }
+    if (/\/api\/licenses\/\d+$/.test(path)) {
+      if (sandbox.__licenseGuard === "block") {
+        return {
+          ok: false, status: 409,
+          json: async () => ({
+            error: "该变更会令 1 条仍在投的渠道投放出现不可发布区间，整笔变更已回滚，授权记录未改动（已撤下的投放不阻拦）",
+            allowed: false, rolled_back: true,
+            action: opts && opts.method === "DELETE" ? "delete" : "update",
+            license_id: 20,
+            affected_placements: [{
+              placement_id: 7, credential_id: 5,
+              channel: "官网专题页", url: "https://example.com/f/1",
+              medium: "audio", medium_label: "音频",
+              publication_date: "2026-10-04",
+              blocked: [{
+                start_seconds: 0, end_seconds: 600,
+                start_timecode: "00:00:00", end_timecode: "00:10:00",
+                status: "blocked", status_label: "不可发布",
+                speakers: ["张三"],
+                reasons: ["张三：许可#20 明确拒绝音频媒介（拒绝优先）"],
+              }],
+            }],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
     if (path.endsWith("/credentials") && opts && opts.method === "POST") {
       return sandbox.__credCreate();
     }
@@ -68,7 +95,7 @@ const sandbox = {
 vm.createContext(sandbox);
 const code = fs.readFileSync("static/app.js", "utf8");
 vm.runInContext(
-  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential, renderPlacements, createPlacement, viewPlacement, withdrawPlacement };",
+  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, delLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential, renderPlacements, createPlacement, viewPlacement, withdrawPlacement };",
   sandbox
 );
 const T = sandbox.__test__;
@@ -132,6 +159,23 @@ async function main() {
     allow_media: ["audio"], deny_media: ["text"],
     embargo_until: "2027-01-01", note: "备注",
   });
+  // 保存成功后提示在投投放复核通过
+  assert.ok(elements.get("license-guard-result").innerHTML.includes("复核通过"));
+
+  // 修改授权被在投投放拦截（409）：整笔回滚，展示受影响投放 ID、链接与阻断区间
+  sandbox.__licenseGuard = "block";
+  await assert.rejects(T.saveLicense(20), /已回滚/);
+  let guardHtml = elements.get("license-guard-result").innerHTML;
+  assert.ok(guardHtml.includes("#7"), "拦截明细应含投放 ID");
+  assert.ok(guardHtml.includes("https://example.com/f/1"), "拦截明细应含投放链接");
+  assert.ok(guardHtml.includes("00:00:00 – 00:10:00"), "拦截明细应含阻断区间");
+  assert.ok(guardHtml.includes("拒绝"), "拦截明细应含阻断原因");
+
+  // 删除授权被拦截（409）：授权仍保留，同样展示拦截明细
+  await assert.rejects(T.delLicense(20), /已回滚/);
+  guardHtml = elements.get("license-guard-result").innerHTML;
+  assert.ok(guardHtml.includes("#7"), "删除拦截明细应含投放 ID");
+  sandbox.__licenseGuard = null;
 
   // 5. 校验结果渲染
   T.renderResults({
