@@ -61,6 +61,10 @@ python app.py          # 默认监听 8000 端口，可用 PORT 环境变量修�
    可发布时才保存「投放中」记录及登记时间，否则说明原因且不留记录。
    列表与「查阅」展示投放状态与凭据当前风险（正常 / 需处理 / 来源缺失）；
    确认渠道内容已撤下后点「撤下」，填写原因并标记「已撤下」，保留撤下时间。
+9. **授权变更提交前复核**：访谈已有「投放中」的渠道投放时，修改或删除授权
+   会在提交前复核 —— 系统在同一写事务中试用变更，并按每条在投投放关联
+   凭据的发布日期与媒介重校验整段；任一版本出现不可发布区间即拦截并回滚
+   整笔变更，页面列出受影响投放、链接与阻断明细。已撤下的投放不阻拦。
 
 访谈、说话人、发言与授权记录均可在页面上直接修改、保存或删除；
 发行凭据封存后不可修改、不可删除，原访谈删除后仍可查阅；
@@ -224,6 +228,57 @@ curl -s -X POST http://localhost:8000/api/placements/1/withdraw \
 - `current.summary` / `current.blocked`：按封存的发布日期与媒介对现有资料
   重新校验的汇总与当前阻断区间；来源缺失时 `current` 为 null。
 
+## 授权变更提交前复核（在投投放保护）
+
+访谈已投放渠道后，修改或删除说话人授权可能让公开内容失去许可。
+`PUT /api/licenses/<id>` 与 `DELETE /api/licenses/<id>` 在同一 SQLite 写事务
+（`BEGIN IMMEDIATE`）中：
+
+1. 读取授权归属（授权 → 说话人 → 访谈）并**试用变更**（暂不提交）；
+2. 按该访谈每条**仍在投**记录所关联凭据的发布日期与媒介，重新校验整段时间轴；
+3. 只要有一个版本出现不可发布区间，就**回滚整笔变更**（HTTP 409），
+   返回受影响的投放 ID、链接、阻断区间及原因；否则照常提交。
+
+已撤下的投放不阻拦；请求体与成功响应保持原样（修改返回更新后的授权，
+删除返回 `{"deleted": <id>}`）；封存凭据不改动，变更落库后资料变化仍按
+凭据 / 台账原逻辑显示「待复核」。
+
+409 响应要点：
+
+- `updated` / `deleted` 为 `false`，`license_id` / `interview_id` 指明归属；
+- `affected_placements`：每条受影响投放的 `placement_id`、`credential_id`、
+  `channel`、`url`、`publication_date`、`medium` 及该版本的
+  `blocked` 阻断区间（含时间码与原因）。
+
+```bash
+# 沿用上文：访谈 #1 已封存凭据 #1 并登记投放 #1（投放中）；
+# 授权 #2（00:05:00-00:10:00 允许音频）为补件写入的那条
+# 把授权 #2 改为拒绝音频 -> 在投投放的音频版 00:05:00-00:10:00 失去许可，整笔回滚
+curl -s -X PUT http://localhost:8000/api/licenses/2 \
+  -H 'Content-Type: application/json' \
+  -d '{"start_seconds": 300, "end_seconds": 600,
+       "allow_media": [], "deny_media": ["audio"]}'
+# HTTP 409：{"updated": false, "license_id": 2, "interview_id": 1,
+#   "error": "该访谈有 1 条在投投放关联的版本在变更后出现不可发布区间，已回滚整笔变更",
+#   "affected_placements": [{"placement_id": 1, "credential_id": 1,
+#     "channel": "官网专题页", "url": "https://example.com/features/oral-history-1",
+#     "publication_date": "2026-10-04", "medium": "audio",
+#     "blocked": [{"start_timecode": "00:05:00", "end_timecode": "00:10:00",
+#       "reasons": ["张三：许可#2 明确拒绝音频媒介（拒绝优先）"], ...}]}]}
+
+# 删除授权 #2 同样被拦截（HTTP 409，deleted 为 false，授权记录仍在）
+curl -s -X DELETE http://localhost:8000/api/licenses/2
+
+# 确认渠道内容已撤下后，投放不再阻拦，变更照常提交
+curl -s -X POST http://localhost:8000/api/placements/1/withdraw \
+  -H 'Content-Type: application/json' -d '{"reason": "专题页已下线"}'
+curl -s -X PUT http://localhost:8000/api/licenses/2 \
+  -H 'Content-Type: application/json' \
+  -d '{"start_seconds": 300, "end_seconds": 600,
+       "allow_media": [], "deny_media": ["audio"]}'
+# HTTP 200：{"id": 2, "speaker_id": 1, "start_seconds": 300, "end_seconds": 600, ...}
+```
+
 ## 数据持久化
 
 - 容器内数据库为 `/data/oral_history.db`，Compose / 运行命令已挂载卷 `oral_history_data`，重启不丢数据。
@@ -242,7 +297,7 @@ curl -s -X POST http://localhost:8000/api/placements/1/withdraw \
 | POST | `/api/interviews/<id>/segments` | 添加发言区间 `{speaker_id, start_seconds, end_seconds}` |
 | PUT / DELETE | `/api/segments/<id>` | 修改 / 删除发言区间 |
 | POST | `/api/speakers/<id>/licenses` | 添加授权 `{start_seconds, end_seconds, allow_media, deny_media, embargo_until, note}` |
-| PUT / DELETE | `/api/licenses/<id>` | 修改 / 删除授权 |
+| PUT / DELETE | `/api/licenses/<id>` | 修改 / 删除授权：提交前复核 —— 同一写事务中试用变更并按在投投放关联版本重校验整段，出现不可发布区间即回滚（409 返回受影响投放与阻断明细）；请求与成功响应保持原样 |
 | POST | `/api/interviews/<id>/evaluate` | 校验 `{publication_date, medium}`，返回合并后的时间码区间与原因 |
 | POST | `/api/interviews/<id>/remediate` | 补件并复核 `{publication_date, medium, commit, supplements}`，同一事务试算 + 满足条件才一次性写入 |
 | POST | `/api/interviews/<id>/credentials` | 封存发行凭据 `{publication_date, medium}`：同一事务校验，全部可发布才落库，失败不留记录 |
@@ -260,9 +315,11 @@ python -m unittest test_evaluator.py -v   # 核心校验逻辑 + 补件批次校
 python -m unittest test_remediation.py -v # 补件事务编排（纯 Python + SQLite）
 python -m unittest test_credentials.py -v # 发行凭据事务编排（纯 Python + SQLite）
 python -m unittest test_placements.py -v  # 渠道投放台账事务编排（纯 Python + SQLite）
+python -m unittest test_license_guard.py -v # 授权变更提交前复核事务编排（纯 Python + SQLite）
 python -m unittest test_remediate_api.py -v  # 补件接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 python -m unittest test_credential_api.py -v # 凭据接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 python -m unittest test_placement_api.py -v  # 投放台账接口 HTTP 层（需 Flask，Docker 镜像内可运行）
+python -m unittest test_license_guard_api.py -v # 授权复核接口 HTTP 层（需 Flask，Docker 镜像内可运行）
 node test_frontend.js                     # 前端交互冒烟测试（可选，需 Node）
 ```
 
@@ -274,13 +331,16 @@ evaluator.py         核心校验逻辑：切分时间轴、逐段判定、相�
 remediation.py       补件并复核：同一 SQLite 事务中的试算与一次性写入
 credentials.py       发行凭据：同一事务中校验并封存，查阅时在一致快照中复核现状
 placements.py        渠道投放台账：同一事务复核来源并登记，一致快照查阅，撤下保留时间
+license_guard.py     授权变更提交前复核：同一写事务中试用变更并按在投投放关联版本重校验整段
 test_evaluator.py    核心逻辑单元测试
 test_remediation.py  补件事务编排单元测试（不依赖 Flask）
 test_credentials.py  发行凭据事务编排单元测试（不依赖 Flask）
 test_placements.py   渠道投放台账事务编排单元测试（不依赖 Flask）
+test_license_guard.py 授权变更提交前复核事务编排单元测试（不依赖 Flask）
 test_remediate_api.py 补件接口 HTTP 层测试（需 Flask）
 test_credential_api.py 凭据接口 HTTP 层测试（需 Flask）
 test_placement_api.py 投放台账接口 HTTP 层测试（需 Flask）
+test_license_guard_api.py 授权复核接口 HTTP 层测试（需 Flask）
 templates/index.html 单页界面
 static/app.js        前端交互（原生 JavaScript）
 static/style.css     样式

@@ -18,6 +18,7 @@ const state = {
   placements: [], // 渠道投放台账列表（含投放状态与凭据风险）
   placementDetail: null, // 正在查阅的投放记录详情
   placementCredentialId: null, // 登记投放时选中的凭据
+  licenseGuard: null, // 授权编辑 / 删除被拦截的明细（409 affected_placements）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -213,6 +214,29 @@ function renderLicenses() {
   $("licenses-body").innerHTML =
     rows || `<tr><td colspan="9" class="empty">暂无授权记录</td></tr>`;
   $("new-lic-speaker").innerHTML = speakerOptions(null);
+  renderLicenseGuard();
+}
+
+/* 授权编辑 / 删除被拦截（409）：展示受影响投放的 ID、链接、阻断区间及原因 */
+function renderLicenseGuard() {
+  const data = state.licenseGuard;
+  const box = $("license-guard-result");
+  if (!data) {
+    box.innerHTML = "";
+    return;
+  }
+  const items = (data.affected_placements || []).map((p) => `
+    <p class="bad-text">投放 #${p.placement_id} · ${esc(p.channel)}
+      · <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a><br>
+      凭据 #${p.credential_id} · 发布日期 ${esc(p.publication_date)}
+      · 媒介 ${mediumLabel(p.medium)} —— 变更后出现
+      ${p.blocked.length} 个不可发布区间：</p>
+    ${intervalsTableHtml(p.blocked)}`).join("");
+  box.innerHTML = `
+    <p class="bad-text">✘ ${esc(data.error)}</p>
+    <p class="hint">已撤下的投放不参与复核；以上投放仍在投，
+      需先撤下投放或调整授权后再试。整笔变更已回滚，授权记录未改动。</p>
+    ${items}`;
 }
 
 function clearResults() {
@@ -287,6 +311,7 @@ async function deleteInterview() {
   state.currentId = null;
   state.remBatch = [];
   state.remResult = null;
+  state.licenseGuard = null;
   clearResults();
   await loadInterviews();
 }
@@ -371,21 +396,44 @@ async function addLicense() {
   if (!speaker_id) throw new Error("请先添加说话人");
   const values = readLicenseInputs("new-lic");
   await api(`/api/speakers/${speaker_id}/licenses`, "POST", values);
+  state.licenseGuard = null;
+  await refreshDetail();
+  render();
+}
+
+/* 授权编辑 / 删除：提交前复核被拦截（409）时展示受影响投放与阻断明细 */
+async function mutateLicense(id, method, values) {
+  let resp;
+  try {
+    resp = await fetch(`/api/licenses/${id}`, {
+      method,
+      headers: values !== undefined
+        ? { "Content-Type": "application/json" } : undefined,
+      body: values !== undefined ? JSON.stringify(values) : undefined,
+    });
+  } catch (e) {
+    throw new Error("无法连接服务器");
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 409) {
+    // 在投投放关联版本出现不可发布区间：整笔已回滚，展示拦截明细
+    state.licenseGuard = data;
+    renderLicenseGuard();
+    throw new Error(data.error || "在投投放关联版本出现不可发布区间，已回滚变更");
+  }
+  if (!resp.ok) throw new Error(data.error || `请求失败（HTTP ${resp.status}）`);
+  state.licenseGuard = null;
   await refreshDetail();
   render();
 }
 
 async function saveLicense(id) {
   const values = readLicenseInputs(`lic-${id}`);
-  await api(`/api/licenses/${id}`, "PUT", values);
-  await refreshDetail();
-  render();
+  await mutateLicense(id, "PUT", values);
 }
 
 async function delLicense(id) {
-  await api(`/api/licenses/${id}`, "DELETE");
-  await refreshDetail();
-  render();
+  await mutateLicense(id, "DELETE");
 }
 
 /* ---------- 校验 ---------- */
@@ -829,6 +877,7 @@ window.addEventListener("DOMContentLoaded", () => {
     state.currentId = Number(e.target.value) || null;
     state.remBatch = [];
     state.remResult = null;
+    state.licenseGuard = null;
     await refreshDetail();
     render();
     clearResults();

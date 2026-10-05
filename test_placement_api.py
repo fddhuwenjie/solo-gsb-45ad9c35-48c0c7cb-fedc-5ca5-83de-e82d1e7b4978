@@ -163,10 +163,15 @@ class PlacementApiTest(unittest.TestCase):
 
     def test_detail_lists_current_blocked_intervals(self):
         pid = self.register().get_json()["id"]
-        self.client.put(f"/api/licenses/{self.license_id()}", json={
-            "start_seconds": 0, "end_seconds": 600,
-            "allow_media": [], "deny_media": ["audio"],
-            "embargo_until": None, "note": ""})
+        # 授权编辑接口已有提交前复核（在投投放下此类变更被拦截回滚，
+        # 见 test_license_guard_api.py）；直接改库模拟资料经其他途径变化
+        conn = sqlite3.connect(_DB)
+        conn.execute(
+            "UPDATE licenses SET allow_media = '[]',"
+            " deny_media = '[\"audio\"]' WHERE id = ?",
+            (self.license_id(),))
+        conn.commit()
+        conn.close()
         detail = self.client.get(f"/api/placements/{pid}").get_json()
         self.assertEqual(detail["risk"], "review")
         blocked = detail["current"]["blocked"]

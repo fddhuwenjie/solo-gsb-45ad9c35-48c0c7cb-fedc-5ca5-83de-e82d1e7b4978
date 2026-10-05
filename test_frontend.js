@@ -7,7 +7,8 @@
  *  4. 校验结果渲染包含时间码与状态；
  *  5. 补件批次渲染、试算请求体与试算结果展示；
  *  6. 发行凭据列表渲染、封存请求体、409 阻断展示与查阅复核视图；
- *  7. 渠道投放台账列表渲染、登记请求体、409 原因展示、查阅风险视图与撤下。 */
+ *  7. 渠道投放台账列表渲染、登记请求体、409 原因展示、查阅风险视图与撤下；
+ *  8. 授权编辑 / 删除被提交前复核拦截（409）时的受影响投放与阻断明细展示。 */
 const fs = require("fs");
 const vm = require("vm");
 const assert = require("assert");
@@ -62,13 +63,20 @@ const sandbox = {
     if (path.endsWith("/withdraw")) {
       return { ok: true, status: 200, json: async () => sandbox.__withdrawResponse };
     }
+    if (path.startsWith("/api/licenses/") && opts
+        && (opts.method === "PUT" || opts.method === "DELETE")) {
+      const hook = opts.method === "DELETE"
+        ? sandbox.__licenseDelete : sandbox.__licensePut;
+      if (hook) return hook();
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
     return { ok: true, status: 200, json: async () => ({}) };
   },
 };
 vm.createContext(sandbox);
 const code = fs.readFileSync("static/app.js", "utf8");
 vm.runInContext(
-  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential, renderPlacements, createPlacement, viewPlacement, withdrawPlacement };",
+  code + "\nglobalThis.__test__ = { state, render, renderResults, saveSegment, saveLicense, delLicense, fmt, parseTimecode, renderRemediate, submitRemediate, renderCredentials, createCredential, viewCredential, renderPlacements, createPlacement, viewPlacement, withdrawPlacement };",
   sandbox
 );
 const T = sandbox.__test__;
@@ -416,6 +424,48 @@ async function main() {
   const wdHtml = elements.get("placement-detail").innerHTML;
   assert.ok(wdHtml.includes("已撤下"), "撤下后详情应显示已撤下");
   assert.ok(wdHtml.includes("2026-10-05 10:00:00"), "撤下后应保留撤下时间");
+
+  // 8. 授权变更提交前复核：编辑 / 删除被拦截（409）时展示受影响投放与阻断明细
+  const guardBody = {
+    updated: false, license_id: 20, interview_id: 1,
+    error: "该访谈有 1 条在投投放关联的版本在变更后出现不可发布区间，已回滚整笔变更",
+    affected_placements: [{
+      placement_id: 7, credential_id: 5, channel: "官网专题页",
+      url: "https://example.com/features/oral-history-1",
+      publication_date: "2026-10-04", medium: "audio",
+      blocked: [{
+        start_seconds: 0, end_seconds: 600,
+        start_timecode: "00:00:00", end_timecode: "00:10:00",
+        status: "blocked", status_label: "不可发布", publishable: false,
+        speakers: ["李四"],
+        reasons: ["李四：许可#20 明确拒绝音频媒介（拒绝优先）"],
+      }],
+    }],
+  };
+  sandbox.__licensePut = () => ({
+    ok: false, status: 409, json: async () => guardBody,
+  });
+  await assert.rejects(T.saveLicense(20), /不可发布区间/);
+  const guardHtml = elements.get("license-guard-result").innerHTML;
+  assert.ok(guardHtml.includes("投放 #7"), "应展示受影响投放 ID");
+  assert.ok(guardHtml.includes("https://example.com/features/oral-history-1"),
+    "应展示受影响投放链接");
+  assert.ok(guardHtml.includes("00:00:00 – 00:10:00"), "应展示阻断区间时间码");
+  assert.ok(guardHtml.includes("拒绝优先"), "应展示阻断原因");
+  // 删除授权被拦截同样展示明细
+  sandbox.__licenseDelete = () => ({
+    ok: false, status: 409,
+    json: async () => ({ ...guardBody, deleted: false }),
+  });
+  await assert.rejects(T.delLicense(20), /不可发布区间/);
+  assert.ok(elements.get("license-guard-result").innerHTML.includes("投放 #7"),
+    "删除被拦截时应展示受影响投放");
+  // 变更成功（无在投投放阻拦）后清空拦截明细
+  sandbox.__licensePut = null;
+  sandbox.__licenseDelete = null;
+  await T.saveLicense(20);
+  assert.strictEqual(elements.get("license-guard-result").innerHTML, "",
+    "变更成功后应清空拦截明细");
 
   console.log("test_frontend.js: 全部通过");
 }
